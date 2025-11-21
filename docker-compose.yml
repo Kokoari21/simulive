@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  # 1. Media Server (RTMP & HLS)
+  nginx-rtmp:
+    image: tiangolo/nginx-rtmp
+    container_name: simulive-nginx
+    ports:
+      - "1935:1935" # RTMP port
+      - "8080:80"   # HLS HTTP port
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+      - ./tmp/hls:/tmp/hls
+    networks:
+      - simulive-net
+
+  # 2. Database (Metadata User & Video)
+  postgres:
+    image: postgres:13-alpine
+    container_name: simulive-db
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: simulive_db
+    ports:
+      - "5432:5432"
+    networks:
+      - simulive-net
+
+  # 3. Message Broker (Queue untuk Job FFmpeg)
+  redis:
+    image: redis:alpine
+    container_name: simulive-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - simulive-net
+
+  # 4. Backend API
+  api:
+    build: . # Assumes Dockerfile in root handles Node setup
+    container_name: simulive-api
+    command: node server.js
+    ports:
+      - "4000:4000"
+    environment:
+      DATABASE_URL: postgres://admin:password@postgres:5432/simulive_db
+      REDIS_HOST: redis
+      NGINX_RTMP_URL: rtmp://nginx-rtmp/live
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./uploads:/usr/src/app/uploads
+      - .:/usr/src/app
+    networks:
+      - simulive-net
+
+  # 5. Worker (FFmpeg Processor)
+  worker:
+    image: jrottenberg/ffmpeg:4.4-ubuntu # Base image with FFmpeg
+    container_name: simulive-worker
+    # We need Node.js installed in this container to run the worker script
+    # In a real prod, build a custom Dockerfile: FROM node -> RUN apt-get install ffmpeg
+    entrypoint: ["/bin/sh", "-c"]
+    command: 
+      - "apt-get update && apt-get install -y curl gnupg && curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && apt-get install -y nodejs && npm install && node worker.js"
+    environment:
+      REDIS_HOST: redis
+      NGINX_RTMP_URL: rtmp://nginx-rtmp/live
+    volumes:
+      - ./uploads:/usr/src/app/uploads
+      - .:/usr/src/app
+    depends_on:
+      - redis
+      - nginx-rtmp
+    networks:
+      - simulive-net
+
+networks:
+  simulive-net:
+    driver: bridge
